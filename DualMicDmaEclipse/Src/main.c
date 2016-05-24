@@ -34,20 +34,34 @@
 #include "stm32f4xx_hal.h"
 
 /* USER CODE BEGIN Includes */
-#include <string.h>
-#include <stdio.h>
+#include "string.h"
+#include "stdio.h"
+#include "math.h"
+#include "arm_math.h"
+#include "errno.h"
+#include "stm32f4xx_hal_tim.h"
 /* USER CODE END Includes */
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
+TIM_HandleTypeDef htim2;
+
 UART_HandleTypeDef huart6;
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-#define ADC_BUFFER_LENGTH 1024
+#define ADC_BUFFER_LENGTH 4000
+#define MAXDELAY 2000
+#define STARTDELAY -2000
+#define TIMEDELAY 0.000003665
 uint32_t ADCBuffer1[ADC_BUFFER_LENGTH]={0};
+
+//error errno solution "undefined reference to `__errno'"
+int errno;
+int* __errno(void){return &errno;}
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,6 +70,10 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART6_UART_Init(void);
+static void MX_TIM2_Init(void);
+
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+                
 
 /* USER CODE BEGIN PFP */
 /* Private function prototypes -----------------------------------------------*/
@@ -63,6 +81,23 @@ static void MX_USART6_UART_Init(void);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
+void ExportValues(uint32_t buffer[])
+{
+	char bufferprint[50] = {""};
+	uint32_t twaalfbit = 4095;
+
+	for(int i=0; i<ADC_BUFFER_LENGTH/2; i++)
+	{
+		  buffer[i] &= twaalfbit;
+		  sprintf(bufferprint,"%05d",(int) buffer[i]);
+		  HAL_UART_Transmit(&huart6,(uint8_t*) bufferprint,strlen(bufferprint),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+	}
+	  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+	  sprintf(bufferprint,"....Finished....");
+	  HAL_UART_Transmit(&huart6,(uint8_t*) bufferprint,strlen(bufferprint),HAL_MAX_DELAY);
+	  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+}
 void Uart_transmit(uint32_t dma_buffer[])
 {
 	int i = 0;
@@ -76,8 +111,7 @@ void Uart_transmit(uint32_t dma_buffer[])
 		  {
 
 			  dma_buffer[i] &= twaalfbit;
-			  //dma_buffer[i] = dma_buffer[i] >> acht;
-			  sprintf(buffer,"pin a1:%d -> %05d   ",count,(int) dma_buffer[i]);
+			  sprintf(buffer,/*pin a1:%d ->*/"%05d"   ,(int) dma_buffer[i]);
 			  HAL_UART_Transmit(&huart6,(uint8_t*) buffer,strlen(buffer),HAL_MAX_DELAY);
 			  count++;
 		  }
@@ -92,18 +126,116 @@ void Uart_transmit(uint32_t dma_buffer[])
 	}
 	HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
 }
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+void Uart_array(double array[], int length)
+{
+	HAL_UART_Transmit(&huart6,(uint8_t*)"...Transmitting...",strlen("...Transmitting..."),HAL_MAX_DELAY);
+	char buffer[50] = {""};
+	for(int i = 0; i<length; i++)
+	{
+		  sprintf(buffer,"%f",array[i]);
+		  HAL_UART_Transmit(&huart6,(uint8_t*) buffer,strlen(buffer),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+	}
+}
+/*void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	HAL_GPIO_WritePin(GPIOD,LD4_Pin,GPIO_PIN_SET);//ORANGE
-}
+}*/
+void Correlate(uint32_t buffer1[], uint32_t buffer2[],double *correlation)
+{
+	double mean1, mean2, s1, s2, s, denom, r;
+	int count = 0;
+	int n = ADC_BUFFER_LENGTH/2;
+	uint32_t twaalfbit = 4095;
+	//mean berekenen
+	mean1 = 0;
+	mean2 = 0;
+	for (int i = 0;i < n;i++)
+	{
+		buffer1[i] = buffer1[i] & twaalfbit;
+		buffer2[i] = buffer2[i] & twaalfbit;
+		mean1 += buffer1[i];
+		mean2 += buffer2[i];
+	}
+	mean1 /= n;
+	mean2 /= n;
 
+	//denominator
+	s1 = 0;
+	s2 = 0;
+	for (int i = 0;i < n;i++) {
+	  s1 += (buffer1[i] - mean1) * (buffer1[i] - mean1);
+	  s2 += (buffer2[i] - mean2) * (buffer2[i] - mean2);
+	}
+	denom = sqrt(s1*s2);
+
+	HAL_UART_Transmit(&huart6,(uint8_t*)"...Denom done...\r\n",strlen("...Denom done...\r\n"),HAL_MAX_DELAY);
+	//correlatie reeks
+
+	for (int delay= -4000; delay<4000; delay++)
+	{
+	  s = 0;
+	  for (int i=0; i<n; i++)
+	  {
+		  //first approach (non-circular)
+		 int j = i + delay;
+		 if (j < 0 || j >= n)
+		 {
+			continue;
+		 }
+		 else
+		 {
+			s += (buffer1[i] - mean1) * (buffer2[j] - mean2);
+		 }
+	  }
+	  r = s / denom;
+	  correlation[count] = r;
+	  count++;
+	  /* r is the correlation coefficient at "delay" */
+
+	}
+}
+int ScanHigh(double * correlation)
+{
+	int top = 5000;
+	double value = 0.0;
+	for(int i = 0; i<7999; i++)
+	{
+		if(correlation[i] > value)
+		{
+			value = correlation[i];
+			top = i;
+		}
+	}
+	return top;
+}
+double berekenHoek(int verschuiving)
+{
+	int d = verschuiving - 4000;
+	int c = 343;
+	float x = 0.07;
+	double hoek = 500;
+	hoek = acos((d * TIMEDELAY * c)/x);
+	hoek = hoek * 57.2957795; //radialen omzetten naar graden
+	return hoek;
+}
+void servoMove(double hoek)
+{
+	int move = 500 + 2.77777 * hoek;
+	//__HAL_TIM_SetCompare(&htim1,TIM_CHANNEL_4,1210);
+
+	  __HAL_TIM_SetCompare(&htim2,TIM_CHANNEL_4,move);
+	  HAL_Delay(2000);
+}
 /* USER CODE END 0 */
 
 int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+//static int __errno = 1;
+//static int errno = 1;
+//static int _errno = 1;
   /* USER CODE END 1 */
 
   /* MCU Configuration----------------------------------------------------------*/
@@ -119,10 +251,14 @@ int main(void)
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_USART6_UART_Init();
+  MX_TIM2_Init();
 
   /* USER CODE BEGIN 2 */
-int printCount = 1;
 char tempbuffer[50]= {""};
+uint32_t bufferPin1[ADC_BUFFER_LENGTH/2]={0};
+uint32_t bufferPin2[ADC_BUFFER_LENGTH/2]={0};
+double correlatieArray[8000]={0};
+HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_4);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -132,20 +268,84 @@ char tempbuffer[50]= {""};
   /* USER CODE END WHILE */
 
   /* USER CODE BEGIN 3 */
-	  HAL_ADC_Start(&hadc1);
-	  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&ADCBuffer1[0], ADC_BUFFER_LENGTH);
 	  if(HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_0))
 	  {
-	   HAL_Delay(500);
-	   HAL_GPIO_WritePin(GPIOD,LD3_Pin,GPIO_PIN_SET);//ORANGE
-	   sprintf(tempbuffer,"printcount: %d   ",printCount);
-	   HAL_UART_Transmit(&huart6,(uint8_t*) tempbuffer,strlen(tempbuffer),HAL_MAX_DELAY);
-	   HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
-	   printCount++;
-	   //met DMA Continious Scan
-	   Uart_transmit(ADCBuffer1);
+		  //Blink twice then constant on -> recording
+		  for(int i = 0; i<5;i++)
+		  {
+			  HAL_Delay(500);
+			  HAL_GPIO_TogglePin(GPIOD,LD6_Pin);//BLUE
+		  }
+		  //start recording samples
+		  for(int i = 0;i<ADC_BUFFER_LENGTH;i++)
+		  {
+			  HAL_ADC_Start(&hadc1);
+			  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&ADCBuffer1[0], ADC_BUFFER_LENGTH);
+		  }
+		  //signal recording stopped, start uart transmit
+		  HAL_GPIO_TogglePin(GPIOD,LD6_Pin);//BLUE
+		  HAL_GPIO_TogglePin(GPIOD,LD5_Pin);//RED
+
+		  /*sprintf(tempbuffer,"printcount: %d   ",printCount);
+		  HAL_UART_Transmit(&huart6,(uint8_t*) tempbuffer,strlen(tempbuffer),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+		  printCount++;
+		  Uart_transmit(ADCBuffer1);*/
+
+		  HAL_Delay(500);
+		  int count1 = 0, count2 = 0;
+		  for(int i = 0; i<ADC_BUFFER_LENGTH; i++)
+		  {
+			  if(i%2==0)
+			  {
+				  bufferPin1[count1] = ADCBuffer1[i];
+				  count1++;
+			  }
+			  else
+			  {
+				  bufferPin2[count2] = ADCBuffer1[i];
+				  count2++;
+				  if(count2 >= ADC_BUFFER_LENGTH/2) count2 = 0;
+			  }
+		  }
+		  /*sprintf(tempbuffer,"Microfoon 1 (pin a1)/r/n");
+		  HAL_UART_Transmit(&huart6,(uint8_t*) tempbuffer,strlen(tempbuffer),HAL_MAX_DELAY);
+		  ExportValues(bufferPin1);
+		  sprintf(tempbuffer,"Microfoon 2 (pin a2)/r/n");
+		  HAL_UART_Transmit(&huart6,(uint8_t*) tempbuffer,strlen(tempbuffer),HAL_MAX_DELAY);
+		  ExportValues(bufferPin2);*/
+		  HAL_GPIO_TogglePin(GPIOD,LD5_Pin);//RED
+		  HAL_GPIO_TogglePin(GPIOD,LD4_Pin);//Yellow
+		  Correlate(bufferPin1, bufferPin2,correlatieArray);
+		  //arm_correlate_f32(bufferPin1, ADC_BUFFER_LENGTH/2, bufferPin2, ADC_BUFFER_LENGTH/2, correlatieArray);
+		  //arm_correlate_fast_q31(bufferPin1,ADC_BUFFER_LENGTH/2, bufferPin2,ADC_BUFFER_LENGTH/2, correlatieArray);
+		  HAL_Delay(500);
+		  HAL_GPIO_TogglePin(GPIOD,LD4_Pin);//Yellow
+		  HAL_GPIO_TogglePin(GPIOD,LD5_Pin);//RED
+		  //drukt correlatie array af
+		  //Uart_array(correlatieArray, 8000);
+		  //end of operations
+		  HAL_Delay(500);
+		  HAL_GPIO_TogglePin(GPIOD,LD5_Pin);//RED
+		  HAL_GPIO_TogglePin(GPIOD,LD3_Pin);//ORANGE
+		  int sweetspot;
+		  char special[50];
+		  sweetspot = ScanHigh(correlatieArray);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+		  sprintf(special,"sweetspot: %d -> %f  ",sweetspot,correlatieArray[sweetspot]);
+		  HAL_UART_Transmit(&huart6,(uint8_t*) special,strlen(special),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"...Done...",strlen("...Done..."),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+		  double hoek = 500;
+		  hoek = berekenHoek(sweetspot);
+		  servoMove(hoek);
+		  sprintf(special,"Hoek: %f  ",hoek);
+		  HAL_UART_Transmit(&huart6,(uint8_t*) special,strlen(special),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"...Done...",strlen("...Done..."),HAL_MAX_DELAY);
+		  HAL_UART_Transmit(&huart6,(uint8_t*)"\r\n",strlen("\r\n"),HAL_MAX_DELAY);
+
 	  }
-	  HAL_ADC_ConvCpltCallback(&hadc1);
+	//HAL_ADC_ConvCpltCallback(&hadc1);
   }
   /* USER CODE END 3 */
 
@@ -223,6 +423,40 @@ void MX_ADC1_Init(void)
   sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = 2;
   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+}
+
+/* TIM2 init function */
+void MX_TIM2_Init(void)
+{
+
+  TIM_ClockConfigTypeDef sClockSourceConfig;
+  TIM_MasterConfigTypeDef sMasterConfig;
+  TIM_OC_InitTypeDef sConfigOC;
+
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 96;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 10000;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  HAL_TIM_Base_Init(&htim2);
+
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig);
+
+  HAL_TIM_PWM_Init(&htim2);
+
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig);
+
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4);
+
+  HAL_TIM_MspPostInit(&htim2);
 
 }
 
